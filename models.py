@@ -42,6 +42,7 @@ class ConnectionRequest(messages.Message):
     externalMainServerPort = messages.IntegerField(5)
     externalRESTServerPort = messages.IntegerField(6)
     clientCountryCode = messages.StringField(7)
+    wishRegularConnections = messages.BooleanField(8)
 
 
 class ConnectionResponse(messages.Message):
@@ -85,7 +86,7 @@ class UpdateRequest(messages.Message):
 class RefreshResponse(messages.Message):
     # OK
     # UNRECOGNIZED_SESSION
-    # todo TOO_SOON (for refresh only. Session is disconnected and requires peer
+    # TOO_SOON (for refresh only. Session is disconnected and requires peer
     # connecting again)
     response = messages.StringField(1)
 
@@ -113,6 +114,10 @@ class InfoRequest(messages.Message):
     peerIDList = messages.StringField(1, repeated=True)
 
 
+class RegularPeersRequest(messages.Message):
+    clientCountryCode = messages.StringField(1)
+
+
 class PeerIDInfo(messages.Message):
     peerID = messages.StringField(1)
     localIPAddress = messages.StringField(2)
@@ -123,6 +128,8 @@ class PeerIDInfo(messages.Message):
     # between 0 and 65535
     externalMainServerPort = messages.IntegerField(6)
     externalRESTServerPort = messages.IntegerField(7)
+    clientCountryCode = messages.StringField(8)
+    wishRegularConnections = messages.BooleanField(9)
 
 
 class InfoResponse(messages.Message):
@@ -151,7 +158,8 @@ class ActiveSession(ndb.Model):
     localRESTServerPort    = ndb.IntegerProperty(required=False, indexed=False)
     externalMainServerPort = ndb.IntegerProperty(required=True, indexed=False)
     externalRESTServerPort = ndb.IntegerProperty(required=False, indexed=False)
-    clientCountryCode      = ndb.StringProperty(required=False, indexed=False)
+    clientCountryCode      = ndb.StringProperty(required=True)
+    wishRegularConnections = ndb.BooleanProperty(required=True)
 
 
 # class StoredSession(ndb.Model):

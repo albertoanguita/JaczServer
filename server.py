@@ -17,6 +17,7 @@
 import datetime
 import logging
 import endpoints
+import json
 from protorpc import message_types
 from protorpc import remote
 from google.appengine.ext import ndb
@@ -33,6 +34,7 @@ from models import RefreshResponse
 from models import RefreshResponseValue
 from models import DisconnectResponse
 from models import InfoRequest
+from models import RegularPeersRequest
 from models import PeerIDInfo
 from models import InfoResponse
 from models import PeerData
@@ -49,6 +51,7 @@ API_EXPLORER_CLIENT_ID = endpoints.API_EXPLORER_CLIENT_ID
 MIN_REMINDER_TIME = 18 * 60000
 MAX_REMINDER_TIME = 20 * 60000
 
+MAX_REGULAR_PEERS_RETRIEVED = 5
 
 
 @endpoints.api(name='server', version='v1', audiences=[ANDROID_AUDIENCE],
@@ -56,7 +59,6 @@ MAX_REMINDER_TIME = 20 * 60000
                                    ANDROID_CLIENT_ID, IOS_CLIENT_ID],
                scopes=[])
 class ServerApi(remote.Service):
-
     @endpoints.method(message_types.VoidMessage, HelloReturn, path='hello',
                       http_method='GET', name='hello')
     def hello(self, request):
@@ -73,7 +75,8 @@ class ServerApi(remote.Service):
         existing_peer_data = self._get_peer_data(request.peerID)
         if existing_peer_data:
             # peer is already registered
-            return RegistrationResponse(response=RegistrationResponseValue.ALREADY_REGISTERED)
+            return RegistrationResponse(
+                response=RegistrationResponseValue.ALREADY_REGISTERED)
 
         now = datetime.datetime.now()
         peer_data = PeerData(peerID=request.peerID,
@@ -113,17 +116,37 @@ class ServerApi(remote.Service):
         #     raise endpoints.BadRequestException(
         #         "Request 'externalRESTServerPort' field required")
 
+        if not request.clientCountryCode:
+            raise endpoints.BadRequestException(
+                "Request 'clientCountryCode' field required")
+
+        if request.wishRegularConnections is None:
+            raise endpoints.BadRequestException(
+                "Request 'wishRegularConnections' field required")
+
         existing_peer_data = self._get_peer_data(request.peerID)
         if not existing_peer_data:
             # peer is not registered
-            return ConnectionResponse(response=ConnectionResponseValue.UNREGISTERED_PEER)
+            return ConnectionResponse(
+                response=ConnectionResponseValue.UNREGISTERED_PEER)
 
-        # self.test_peer_ports(
-        #     request.peerID,
-        #     request.localIPAddress,
-        #     request.externalMainServerPort)
+        client_reachable = self.test_peer_ports(
+            request.peerID,
+            self.request_state.remote_address,
+            request.externalMainServerPort)
 
-        existing_session = self._get_active_session_by_peer(peer_id=request.peerID)
+        logging.info(client_reachable)
+
+        if not client_reachable:
+            return ConnectionResponse(
+                response=ConnectionResponseValue.PEER_MAIN_SERVER_UNREACHABLE,
+                sessionID='',
+                minReminderTime=MIN_REMINDER_TIME,
+                maxReminderTime=MAX_REMINDER_TIME)
+
+
+        existing_session = self._get_active_session_by_peer(
+            peer_id=request.peerID)
         if existing_session:
             logging.info("Session already exists, deleting old session")
             existing_session.key.delete()
@@ -137,16 +160,19 @@ class ServerApi(remote.Service):
                                        externalIPAddress=self.request_state.remote_address,
                                        localMainServerPort=request.localMainServerPort,
                                        # localRESTServerPort=request.localRESTServerPort,
-                                       externalMainServerPort=request.externalMainServerPort)
-                                       # externalRESTServerPort=request.externalRESTServerPort)
+                                       externalMainServerPort=request.externalMainServerPort,
+                                       clientCountryCode=request.clientCountryCode,
+                                       wishRegularConnections=request.wishRegularConnections)
+        # externalRESTServerPort=request.externalRESTServerPort)
         active_session_key = active_session.put()
         session_id = active_session_key.urlsafe()
 
         # generate the response
-        connection_response = ConnectionResponse(response=ConnectionResponseValue.OK,
-                                                 sessionID=session_id,
-                                                 minReminderTime=MIN_REMINDER_TIME,
-                                                 maxReminderTime=MAX_REMINDER_TIME)
+        connection_response = ConnectionResponse(
+            response=ConnectionResponseValue.OK,
+            sessionID=session_id,
+            minReminderTime=MIN_REMINDER_TIME,
+            maxReminderTime=MAX_REMINDER_TIME)
         # response = ConnectionResponse()
         # setattr(response, "response", "hello, %s" % request.peerID)
         # setattr(response, "verb", "POST")
@@ -166,11 +192,14 @@ class ServerApi(remote.Service):
         if active_session:
             # active session for this peer exists
             # check that the peer IP address is similar to the stored one
-            if (active_session.externalIPAddress != self.request_state.remote_address):
-                return RefreshResponse(response=RefreshResponseValue.WRONG_IP_ADDRESS)
+            if (
+                        active_session.externalIPAddress != self.request_state.remote_address):
+                return RefreshResponse(
+                    response=RefreshResponseValue.WRONG_IP_ADDRESS)
             # Check if ok or too soon
             now = datetime.datetime.now()
-            if active_session.lastRefreshTime < now - datetime.timedelta(milliseconds=MIN_REMINDER_TIME):
+            if active_session.lastRefreshTime < now - datetime.timedelta(
+                    milliseconds=MIN_REMINDER_TIME):
                 # last refresh time older than now - MIN_REMINDER_TIME -> OK
                 active_session.lastRefreshTime = now
                 active_session.put()
@@ -181,7 +210,8 @@ class ServerApi(remote.Service):
                 return RefreshResponse(response=RefreshResponseValue.TOO_SOON)
 
         else:
-            return RefreshResponse(response=RefreshResponseValue.UNRECOGNIZED_SESSION)
+            return RefreshResponse(
+                response=RefreshResponseValue.UNRECOGNIZED_SESSION)
 
     @endpoints.method(UpdateRequest, DisconnectResponse, path='disconnect',
                       http_method='POST', name='disconnect')
@@ -215,8 +245,8 @@ class ServerApi(remote.Service):
         for peerID in request.peerIDList:
             peer_id_list.append(peerID)
 
-        active_sessions = ActiveSession\
-            .query(ActiveSession.peerID.IN(peer_id_list))\
+        active_sessions = ActiveSession \
+            .query(ActiveSession.peerID.IN(peer_id_list)) \
             .fetch()
 
         peer_id_info_list = []
@@ -227,7 +257,44 @@ class ServerApi(remote.Service):
                     localIPAddress=peer_session.localIPAddress,
                     externalIPAddress=peer_session.externalIPAddress,
                     localMainServerPort=peer_session.localMainServerPort,
-                    externalMainServerPort=peer_session.externalMainServerPort
+                    externalMainServerPort=peer_session.externalMainServerPort,
+                    clientCountryCode=peer_session.clientCountryCode,
+                    wishRegularConnections=peer_session.wishRegularConnections
+                )
+            )
+
+        info_response = InfoResponse(peerIDInfoList=peer_id_info_list)
+        return info_response
+
+    @endpoints.method(RegularPeersRequest, InfoResponse, path='regular_peers_request',
+                      http_method='POST', name='regular_peers_request')
+    def regular_peers_request(self, request):
+        """Create new conference."""
+        # session_id = generate_session_id(32)
+        # check fields from request
+        if not request.clientCountryCode:
+            raise endpoints.BadRequestException(
+                "Request 'clientCountryCode' field required")
+
+        # retrieve a list of candidate peers (same country as in request)
+        query = ActiveSession.query() \
+            .filter(
+            ActiveSession.clientCountryCode == request.clientCountryCode).filter(
+            ActiveSession.wishRegularConnections == True)
+
+        active_sessions = query.fetch(MAX_REGULAR_PEERS_RETRIEVED)
+
+        peer_id_info_list = []
+        for peer_session in active_sessions:
+            peer_id_info_list.append(
+                PeerIDInfo(
+                    peerID=peer_session.peerID,
+                    localIPAddress=peer_session.localIPAddress,
+                    externalIPAddress=peer_session.externalIPAddress,
+                    localMainServerPort=peer_session.localMainServerPort,
+                    externalMainServerPort=peer_session.externalMainServerPort,
+                    clientCountryCode=peer_session.clientCountryCode,
+                    wishRegularConnections=peer_session.wishRegularConnections
                 )
             )
 
@@ -267,13 +334,23 @@ class ServerApi(remote.Service):
         }
         form_data = urllib.urlencode(form_fields)
         result = urlfetch.fetch(
-            url="http://159.147.253.223:8080/porttestservice/ports",
+            url="http://139.162.162.223:8080/porttestservice/ports",
             # url="http://127.0.0.1:8080/porttestservice/ports",
             payload=form_data,
             method=urlfetch.POST,
             headers={
                 'Content-Type': 'application/x-www-form-urlencoded'})
         logging.info(result.content)
+        logging.info(json.loads(result.content).get("result"))
+
+        if json.loads(result.content).get("result") == 'OK':
+            return True
+        else:
+            return False
+        # if result.content.result == 'OK':
+        #     logging.info('Client is reachable')
+        # else:
+        #     logging.info('Client is unreachable')
         return
 
     @staticmethod
